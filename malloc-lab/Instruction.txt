@@ -1,0 +1,13 @@
+ gcc -g -Wall -o test_mm test_mm.c mm.c memlib.c
+ : test_mm.c 테스트 전 컴파일
+
+  ./test_mm
+  : test_mm.c 메인함수 테스트
+
+  // 메모
+
+  void *coalesce(void *bp)
+{
+    // Error 1.  PREV_BLKP(bp)나 FTRP(PREV_BLKP(bp))가 "힙의 경계 바깥"을 참조해서 세그먼트 폴트 발생
+    // size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록 푸터의 alloc여부
+}
