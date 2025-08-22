@@ -142,6 +142,7 @@ void *mm_malloc(size_t size)
  */
 static void *find_fit(size_t asize)
 {
+    // 전체 순회 
     char *bp = heap_listp;
     while (GET_SIZE(HDRP(bp)) > 0)
     {
@@ -159,21 +160,24 @@ static void *find_fit(size_t asize)
  */
 static void place(void *bp, size_t asize)
 {
-    size_t csize = GET_SIZE(HDRP(bp)); // 현재 가용 블록의 전체 크기
-    if ((csize - asize) >= (2 * DSIZE))
+    size_t totalsize = GET_SIZE(HDRP(bp)); // 현재 가용 블록의 전체 크기
+
+    // 남은 크기가 최소 블록 크기(헤더+payload+푸터 = 16바이트) 이상이면 분할
+    if ((totalsize - asize) >= (2 * DSIZE))
     {
         // 블록 분할
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        char *next_bp = NEXT_BLKP(bp);
-        PUT(HDRP(next_bp), PACK(csize - asize, 0));
-        PUT(FTRP(next_bp), PACK(csize - asize, 0));
+
+        char *next_bp = NEXT_BLKP(bp); // 남은 영역의 다음 블록 payload 주소
+        PUT(HDRP(next_bp), PACK(totalsize - asize, 0)); // 남은 영역 헤더: 남은 크기, free해버림
+        PUT(FTRP(next_bp), PACK(totalsize - asize, 0)); // 남은 영역 푸터: 남은 크기, free해버림
     }
     else
     {
         // 그냥 전부 할당
-        PUT(HDRP(bp), PACK(csize, 1));
-        PUT(FTRP(bp), PACK(csize, 1));
+        PUT(HDRP(bp), PACK(totalsize, 1));
+        PUT(FTRP(bp), PACK(totalsize, 1));
     }
 }
 
@@ -218,7 +222,7 @@ static void *coalesce(void *bp)
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
     }
-    
+
     return bp;
 }
 
@@ -238,8 +242,7 @@ void mm_free(void *bp)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    if (ptr == NULL)
-        return mm_malloc(size);
+    if (ptr == NULL) return mm_malloc(size); // 포인터가 NULL이면 새 블록 할당해야 하는구나
     if (size == 0)
     {
         mm_free(ptr);
@@ -248,11 +251,12 @@ void *mm_realloc(void *ptr, size_t size)
 
     size_t old_size = GET_SIZE(HDRP(ptr)) - DSIZE; // 기존 payload 크기
     void *newptr = mm_malloc(size);
-    if (newptr == NULL)
-        return NULL;
+
+    if (newptr == NULL) return NULL;
 
     size_t copySize = (size < old_size) ? size : old_size;
-    memcpy(newptr, ptr, copySize);
+    memcpy(newptr, ptr, copySize); // memcpy : 메모리 영역을 "복사"하는 함수 memcpy(목적지_주소, 원본_주소, 복사_크기);
+    
     mm_free(ptr);
     return newptr;
 }
