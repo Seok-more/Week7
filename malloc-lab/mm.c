@@ -43,6 +43,8 @@ team_t team = {
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
+#define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+
 /////////////////////////////////
 static char *heap_listp = NULL;
 static void *extend_heap(size_t words);
@@ -79,7 +81,7 @@ int mm_init(void)
 }
 
 /*
- * extend_heap - Extend the heap with a new free block and return its block pointer.
+ * extend_heap - 힙을 words만큼 확장, 새로운 가용 블록을 리턴함
  */
 static void *extend_heap(size_t words)
 {
@@ -156,7 +158,7 @@ static void *find_fit(size_t asize)
 }
 
 /*
- * place - bp 위치의 free 블록에 asize만큼 할당, 필요하면 분할
+ * place - bp 위치의 free 블록에 asize만큼 할당, 필요하면 분할해버림
  */
 static void place(void *bp, size_t asize)
 {
@@ -217,7 +219,7 @@ static void *coalesce(void *bp)
     // Case 4: 이전/다음 모두 free
     else
     {
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        size += ( GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp))) );
         bp = PREV_BLKP(bp);
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
