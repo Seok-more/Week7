@@ -1,13 +1,23 @@
- gcc -g -Wall -o test_mm test_mm.c mm.c memlib.c
- : test_mm.c 테스트 전 컴파일
+mm_2.c를 테스트하려면 Makefile에서 mm.o 대신 mm_2.o를 사용하도록 변경하면 됩니다!
+함수 이름이 표준대로 맞으면 mdriver.c는 건드릴 필요 없습니다.
 
-  ./test_mm
-  : test_mm.c 메인함수 테스트
+이거를
+OBJS = mdriver.o mm.o memlib.o fsecs.o fcyc.o clock.o ftimer.o
 
-  // 메모
+mdriver: $(OBJS)
+	$(CC) $(CFLAGS) -o mdriver $(OBJS)
 
-  void *coalesce(void *bp)
-{
-    // Error 1.  PREV_BLKP(bp)나 FTRP(PREV_BLKP(bp))가 "힙의 경계 바깥"을 참조해서 세그먼트 폴트 발생
-    // size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록 푸터의 alloc여부
-}
+mm.o: mm.c mm.h memlib.h
+
+->
+
+요렇게
+OBJS = mdriver.o mm_2.o memlib.o fsecs.o fcyc.o clock.o ftimer.o
+
+mdriver: $(OBJS)
+	$(CC) $(CFLAGS) -o mdriver $(OBJS)
+
+mm_2.o: mm_2.c mm.h memlib.h
+
+mm_2 : explicit
+mm_3 : 언리얼 참고 구현 해볼까

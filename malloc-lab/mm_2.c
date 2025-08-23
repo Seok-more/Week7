@@ -117,13 +117,11 @@ void *mm_malloc(size_t size)
     // 1. 최소 블록 크기(헤더+payload+푸터) 맞추고 8바이트 단위로 정렬
     if (size <= DSIZE)
     {
-        // 블록의 payload alignment를 8바이트로 징렬하라고 CSAPP문서에 존재함
         asize = 2 * DSIZE; // 최소 16바이트
     }
     else
     {
-        // asize = ALIGN(size + DSIZE); 
-        asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE); // 헤더 + payload + 푸터
+        asize = ALIGN(size + DSIZE); // Header + payload + footer
     }
 
     // 2. 가용 리스트에서 asize만큼 맞는 블록 탐색
@@ -148,7 +146,7 @@ static void *find_fit(size_t asize)
 {
     // 전체 순회 
     char *bp = heap_listp;
-    while (GET_SIZE(HDRP(bp)) > 0) // 에필로그 블록이 크기가 0이니까
+    while (GET_SIZE(HDRP(bp)) > 0)
     {
         if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= asize))
         {
