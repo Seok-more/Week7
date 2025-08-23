@@ -19,5 +19,11 @@ mdriver: $(OBJS)
 
 mm_2.o: mm_2.c mm.h memlib.h
 
+//////////////////////////////////////////////
+
+./mdriver
+
 mm_2 : explicit
 mm_3 : 언리얼 참고 구현 해볼까
+
+Copilot: Disable 했음

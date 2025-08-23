@@ -46,12 +46,89 @@ team_t team = {
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
 /////////////////////////////////
-static char *heap_listp = NULL;
+static char *heap_listp = NULL; // 힙의 첫 시작점(프롤로그 블록의 payload)을 가리킴
+static char *free_listp = NULL; // 힙에서 가장 처음에 있는 free 블록 주소 가리킴
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
+static void insert_free_block(void *bp);   
+static void delete_free_block(void *bp); 
 /////////////////////////////////
+
+
+/*
+ *  insert_free_block - free 블록을 가용 리스트에 추가, address order가 더 좋대
+ */
+
+static void insert_free_block(void *bp)
+{
+    void *prev = NULL;
+    void *now = free_listp;
+
+    // 주소 오름차순으로 탐색
+    while(now != NULL && (char*)now < (char*)bp)
+    {
+        prev = now;
+        now = SUCC(now);
+    }
+
+    // prev와 now 사이에 bp 삽입
+    PRED(bp) = prev;
+    SUCC(bp) = now;
+
+    // bp가 맨끝에 들어가는게 아니라면
+    if (now != NULL)
+    {
+        PRED(now) = bp;
+    }
+    
+    // bp가 맨 앞에 들어가는게 아니라면
+    if (prev != NULL)
+    {
+        SUCC(prev) = bp;
+    }
+
+    // bp가 맨 앞에 들어감
+    else 
+    {
+        free_listp = bp;
+    }
+
+}
+
+/*
+ *  delete_free_block - free 블록을 가용 리스트에서 제거
+ */
+
+static void delete_free_block(void *bp)
+{
+    // 삭제할 노드가 첫 노드
+    if (bp == free_listp)
+    {
+        free_listp = SUCC(bp);
+        
+        // 리스트에 bp만 있는게 아니였다면
+        if (free_listp != NULL)
+        {
+            PRED(free_listp) = NULL;
+        }
+    }
+    // 삭제할 노드가 중간이나 마지막
+    else
+    {
+        // 사실 이건 없어도 되는데 그냥 가시성 용으로
+        if (PRED(bp) != NULL)
+        {
+            SUCC(PRED(bp)) = SUCC(bp);
+        }
+
+        if (SUCC(bp) != NULL)
+        {
+            PRED(SUCC(bp)) = PRED(bp);
+        }
+    }
+}
 
 /*
  * mm_init - initialize the malloc package.
@@ -71,8 +148,9 @@ int mm_init(void)
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); // 프롤로그 푸터
     PUT(heap_listp + (3*WSIZE), PACK(0, 1));     // 에필로그 헤더
 
-    // heap_listp += (WSIZE); -> 이건 프롤로그푸터를 가리켜서 그 다음 주소가 첫 가용 블록의 헤더임
+    
     heap_listp += (2*WSIZE); // heap_listp를 첫 가용 블록의 payload 주소로 이동(보통 payload 기준으로 블록포인터 잡음)
+    free_listp = NULL; // 초기화를 해야지
 
     // 3. 빈 힙을 CHUNKSIZE 크기의 가용 블록으로 확장 
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL) return -1;
@@ -144,15 +222,16 @@ void *mm_malloc(size_t size)
  */
 static void *find_fit(size_t asize)
 {
-    // 전체 순회 
-    char *bp = heap_listp;
-    while (GET_SIZE(HDRP(bp)) > 0)
+    // free 리스트만 전체 순회 
+    char *bp = free_listp;
+
+    while (bp)
     {
-        if (!GET_ALLOC(HDRP(bp)) && (GET_SIZE(HDRP(bp)) >= asize))
+        if ((GET_SIZE(HDRP(bp)) >= asize))
         {
             return bp;
         }
-        bp = NEXT_BLKP(bp);
+        bp = SUCC(bp);
     }
     return NULL;
 }
@@ -164,6 +243,8 @@ static void place(void *bp, size_t asize)
 {
     size_t totalsize = GET_SIZE(HDRP(bp)); // 현재 가용 블록의 전체 크기
 
+    delete_free_block(bp);
+
     // 남은 크기가 최소 블록 크기(헤더+payload+푸터 = 16바이트) 이상이면 분할
     if ((totalsize - asize) >= (2 * DSIZE))
     {
@@ -171,9 +252,13 @@ static void place(void *bp, size_t asize)
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
 
+
         char *next_bp = NEXT_BLKP(bp); // 남은 영역의 다음 블록 payload 주소
         PUT(HDRP(next_bp), PACK(totalsize - asize, 0)); // 남은 영역 헤더: 남은 크기, free해버림
         PUT(FTRP(next_bp), PACK(totalsize - asize, 0)); // 남은 영역 푸터: 남은 크기, free해버림
+
+        insert_free_block(next_bp);
+
     }
     else
     {
@@ -181,6 +266,7 @@ static void place(void *bp, size_t asize)
         PUT(HDRP(bp), PACK(totalsize, 1));
         PUT(FTRP(bp), PACK(totalsize, 1));
     }
+    
 }
 
 
@@ -196,6 +282,7 @@ static void *coalesce(void *bp)
     // Case 1: 이전/다음 모두 할당됨
     if (prev_alloc && next_alloc)
     {
+        insert_free_block(bp); // 새로운 free 블록 리스트에 추가
         return bp;
     }
 
@@ -203,8 +290,11 @@ static void *coalesce(void *bp)
     else if (prev_alloc && !next_alloc)
     {
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        delete_free_block(NEXT_BLKP(bp)); // 다음블록은 이제 없는거
+
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
+        insert_free_block(bp);
     }
 
     // Case 3: 이전 free, 다음 할당
@@ -212,17 +302,24 @@ static void *coalesce(void *bp)
     {
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         bp = PREV_BLKP(bp);
+        delete_free_block(bp);
+
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
+        insert_free_block(bp);
     }
 
     // Case 4: 이전/다음 모두 free
     else
     {
         size += ( GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp))) );
+        delete_free_block(NEXT_BLKP(bp));
         bp = PREV_BLKP(bp);
+        delete_free_block(bp);
+       
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
+        insert_free_block(bp);
     }
 
     return bp;

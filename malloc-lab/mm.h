@@ -21,6 +21,12 @@
 #define NEXT_BLKP(bp)   ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE))) // bp 기준 다음 블록 포인터 계산
 #define PREV_BLKP(bp)   ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE))) // bp 기준 이전 블록 포인터 계산
 
+//[헤더][pred][succ][payload][푸터]
+//     ↑     ↑
+//     bp   bp+WSIZE
+#define PRED(bp) (*(void **)(bp))
+#define SUCC(bp) (*(void **)((char *)(bp) + WSIZE))
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
