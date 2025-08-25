@@ -27,12 +27,17 @@
 #define PRED(bp) (*(void **)(bp))
 #define SUCC(bp) (*(void **)((char *)(bp) + WSIZE))
 
+// --------mm_3.c 언리얼 스타일 전용 매크로 --------
+#define BIN_COUNT      32                  // bin 개수 (16, 32, ..., 16*BIN_COUNT)
+#define BIN_MIN_SIZE   16                  // 최소 bin size
+#define BIN_MAX_SIZE   (BIN_MIN_SIZE * BIN_COUNT) // 최대 bin size
 
-//////
-#define FB(bp) ((FreeBlock *)(bp))
+#define BIN_INDEX(sz)  (((sz) <= BIN_MIN_SIZE) ? 0 : (((sz) - 1) / BIN_MIN_SIZE))
+
+#define MIN_BLOCK_SIZE (WSIZE + WSIZE + WSIZE + WSIZE) // 헤더 + pred + succ + 푸터 = 4*WSIZE = 32B (8B 시스템 기준)
+// -------------------------------------------------------------
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
 
 #include <stdio.h>
 
@@ -40,7 +45,6 @@ extern int mm_init (void);
 extern void *mm_malloc (size_t size);
 extern void mm_free (void *ptr);
 extern void *mm_realloc(void *ptr, size_t size);
-
 
 /* 
  * Students work in teams of one or two.  Teams enter their team name, 
@@ -56,4 +60,3 @@ typedef struct {
 } team_t;
 
 extern team_t team;
-

@@ -26,11 +26,11 @@
  ********************************************************/
 team_t team = {
     /* Team name */
-    "ateam",
+    "Explicit: best-fit, coalescing-realloc",
     /* First member's full name */
-    "Harry Bovik",
+    "Seok-more",
     /* First member's email address */
-    "bovik@cs.cmu.edu",
+    "wjstjrah2000@gmail.com",
     /* Second member's full name (leave blank if none) */
     "",
     /* Second member's email address (leave blank if none) */
@@ -48,6 +48,7 @@ team_t team = {
 /////////////////////////////////
 static char *heap_listp = NULL; // 힙의 첫 시작점(프롤로그 블록의 payload)을 가리킴
 static char *free_listp = NULL; // 힙에서 가장 처음에 있는 free 블록 주소 가리킴
+static char *last_fit = NULL; // next-fit용
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
@@ -63,6 +64,7 @@ static void delete_free_block(void *bp);
 
 static void insert_free_block(void *bp)
 {
+    // printf("insert_free_block: %p\n", bp);
     void *prev = NULL;
     void *now = free_listp;
 
@@ -103,6 +105,9 @@ static void insert_free_block(void *bp)
 
 static void delete_free_block(void *bp)
 {
+
+    // printf("delete_free_block: %p\n", bp);
+    
     // 삭제할 노드가 첫 노드
     if (bp == free_listp)
     {
@@ -221,24 +226,26 @@ void *mm_malloc(size_t size)
  * find_fit - asize 크기 이상의 가용 블록을 찾아서 payload 포인터 반환
  */
 // best-fit 방삭
-static void *find_fit(size_t asize) 
-{
-    char *bp = free_listp;
-    char *best = NULL;
-    size_t min_size = (size_t)-1;
+ static void *find_fit(size_t asize) 
+ {
+     char *bp = free_listp;
+     char *best = NULL;
+     size_t min_size = (size_t)-1;
 
-    while (bp) 
-    {
-        size_t curr_size = GET_SIZE(HDRP(bp));
-        if (curr_size >= asize && curr_size < min_size) 
-        {
-            best = bp;
-            min_size = curr_size;
-        }
-        bp = SUCC(bp);
-    }
-    return best;
-}
+     while (bp) 
+     {
+         size_t curr_size = GET_SIZE(HDRP(bp));
+         if (curr_size >= asize && curr_size < min_size) 
+         {
+             best = bp;
+             min_size = curr_size;
+         }
+         bp = SUCC(bp);
+     }
+     return best;
+ }
+
+
 
 /*
  * place - bp 위치의 free 블록에 asize만큼 할당, 필요하면 분할해버림
