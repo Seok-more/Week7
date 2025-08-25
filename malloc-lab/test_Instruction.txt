@@ -22,8 +22,55 @@ mm_2.o: mm_2.c mm.h memlib.h
 //////////////////////////////////////////////
 
 ./mdriver
+ ./mdriver -t ./traces -v
 
 mm_2 : explicit
 mm_3 : 언리얼 참고 구현 해볼까
 
+
+
 Copilot: Disable 했음
+
+2. mm_3.c: 언리얼 스타일(분리 명시적 가용 리스트, binned allocator)
+구조와 원리
+크기별로 여러 bin array가 있음 → 각각의 bin에 명시적 free list가 있음
+블록 구조: [헤더][pred][succ][payload][푸터]
+pred/succ: 각 free block이 자신과 같은 bin 내에서 이전/다음 free block을 가리킴
+bp는 항상 pred 위치를 가리킴 (payload가 아님)
+가용 리스트: 여러 개의 bin (bins[BIN_COUNT])를 통해, 블록 크기에 따라 분리 관리
+fit 탐색: 할당 요청 크기에 맞는 bin부터 우선 탐색 (일종의 first-fit)
+malloc/free/realloc:
+malloc: bin에서 fit 찾고, 분할/할당, 없으면 heap 늘림
+free: 블록을 bin에 삽입, 병합(coalesce)
+realloc: in-place 확장(가능하면), 새 블록 할당+복사
+특징
+언리얼 스타일의 핵심:
+크기별 bin(분리된 free list): 작은/큰 블록 각각 다른 bin에서 관리 → 빠른 할당, 탐색 효율
+명시적 free list: pred/succ로 free block끼리만 연결
+블록 관리가 주소순, 크기순이 아니라 'bin 순'
+성능: 탐색/할당이 빠름, 메모리 단편화 줄이기 유리
+
+3. 언리얼 스타일 메모리 관리의 핵심
+분리 명시적 가용 리스트(Binned Explicit Free List)
+bin array: 여러 개의 가용 리스트를 각 크기(binned)로 나눈다
+각 bin: 명시적 연결리스트(pred/succ)로 free block 연결
+insert_free_block, delete_free_block: bin index 계산 후 해당 bin에서 pred/succ 연결 조작
+malloc:
+요청 크기에 맞는 bin부터 fit을 탐색
+fit이 있으면 할당, 없으면 heap 확장
+분할 시 남은 free block은 bin에 다시 삽입
+free:
+병합(coalesce) 후 bin에 삽입
+realloc:
+in-place 확장(가능하면), 아니면 새 블록 할당 후 데이터 복사
+
+4. 비교 요약
+항목	mm_2.c (naive, 명시적 free list)	mm_3.c (언리얼, binned explicit free list)
+가용 리스트	1개 (전체 free block)	bin마다 별도의 free list
+블록 연결	pred/succ, 주소순	pred/succ, bin별 연결
+fit 탐색	전체 리스트 순회	bin 내에서만 탐색 (빠름)
+병합/분할	인접 free block 병합, 분할	동일, 단 bin 관리
+할당 방식	first-fit	first-fit, bin별 우선순위
+성능	느림, 단순	빠름, 메모리 단편화 적음
+구조	[헤더][payload][푸터]	[헤더][pred][succ][payload][푸터]
+구현 난이도	쉬움	복잡함, 관리 코드 많음

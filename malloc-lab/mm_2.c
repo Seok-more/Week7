@@ -220,20 +220,24 @@ void *mm_malloc(size_t size)
 /*
  * find_fit - asize 크기 이상의 가용 블록을 찾아서 payload 포인터 반환
  */
-static void *find_fit(size_t asize)
+// best-fit 방삭
+static void *find_fit(size_t asize) 
 {
-    // free 리스트만 전체 순회 
     char *bp = free_listp;
+    char *best = NULL;
+    size_t min_size = (size_t)-1;
 
-    while (bp)
+    while (bp) 
     {
-        if ((GET_SIZE(HDRP(bp)) >= asize))
+        size_t curr_size = GET_SIZE(HDRP(bp));
+        if (curr_size >= asize && curr_size < min_size) 
         {
-            return bp;
+            best = bp;
+            min_size = curr_size;
         }
         bp = SUCC(bp);
     }
-    return NULL;
+    return best;
 }
 
 /*
@@ -339,23 +343,134 @@ void mm_free(void *bp)
 /*
  * mm_realloc - 블록 크기 재조정 (새 블록 할당, 데이터 복사, 기존 블록 해제)
  */
-void *mm_realloc(void *ptr, size_t size)
+
+ // realloc in-place 확장
+void *mm_realloc(void *ptr, size_t size) 
 {
-    if (ptr == NULL) return mm_malloc(size); // 포인터가 NULL이면 새 블록 할당해야 하는구나
-    if (size == 0)
-    {
-        mm_free(ptr);
-        return NULL;
+    if (ptr == NULL) return mm_malloc(size); // 그냥 그대로 해줘야함
+
+    if (size == 0) 
+    { 
+        mm_free(ptr); 
+        return NULL; 
     }
 
-    size_t old_size = GET_SIZE(HDRP(ptr)) - DSIZE; // 기존 payload 크기
+    size_t old_size = GET_SIZE(HDRP(ptr));
+    size_t asize = (size <= DSIZE) ? 2 * DSIZE : ALIGN(size + DSIZE);
+
+    // 축소
+    if (asize < old_size && (old_size - asize) >= (2 * DSIZE)) 
+    {
+        // 앞부분은 asize만큼 할당
+        PUT(HDRP(ptr), PACK(asize, 1));
+        PUT(FTRP(ptr), PACK(asize, 1));
+
+        // 뒷부분은 새로운 free block
+        char *next_blk = NEXT_BLKP(ptr);
+        PUT(HDRP(next_blk), PACK(old_size - asize, 0));
+        PUT(FTRP(next_blk), PACK(old_size - asize, 0));
+        insert_free_block(next_blk);
+
+        // 기존 ptr 반환
+        return ptr;
+    }
+
+
+    // 확장 : 앞에만, 뒤에만, 앞뒤전부, 혼자
+    void *prev_blk = PREV_BLKP(ptr);
+    size_t prev_alloc = GET_ALLOC(FTRP(prev_blk));
+    size_t prev_size = GET_SIZE(HDRP(prev_blk));
+
+    void *next_blk = NEXT_BLKP(ptr);
+    size_t next_alloc = GET_ALLOC(HDRP(next_blk));
+    size_t next_size = GET_SIZE(HDRP(next_blk));
+
+    // 1. next block만으로 확장
+    if (!next_alloc && (old_size + next_size) >= asize) 
+    {
+        delete_free_block(next_blk);
+        size_t combined_size = old_size + next_size;
+
+        // 분할 가능하면 분할
+        if ((combined_size - asize) >= (2 * DSIZE)) 
+        {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+            char *next_new_blk = NEXT_BLKP(ptr);
+            PUT(HDRP(next_new_blk), PACK(combined_size - asize, 0));
+            PUT(FTRP(next_new_blk), PACK(combined_size - asize, 0));
+            insert_free_block(next_new_blk);
+        } 
+        else 
+        {
+            PUT(HDRP(ptr), PACK(combined_size, 1));
+            PUT(FTRP(ptr), PACK(combined_size, 1));
+        }
+        return ptr;
+    }
+
+    // 2. prev block만으로 확장
+    if (!prev_alloc && (prev_size + old_size) >= asize) 
+    {
+        delete_free_block(prev_blk);
+        size_t combined_size = prev_size + old_size;
+
+        // 데이터 이동 (payload 복사)
+        memmove(prev_blk, ptr, (old_size - DSIZE < size) ? (old_size - DSIZE) : size);
+
+        // 분할 가능하면 분할
+        if ((combined_size - asize) >= (2 * DSIZE)) 
+        {
+            PUT(HDRP(prev_blk), PACK(asize, 1));
+            PUT(FTRP(prev_blk), PACK(asize, 1));
+            char *next_new_blk = NEXT_BLKP(prev_blk);
+            PUT(HDRP(next_new_blk), PACK(combined_size - asize, 0));
+            PUT(FTRP(next_new_blk), PACK(combined_size - asize, 0));
+            insert_free_block(next_new_blk);
+        } 
+        else 
+        {
+            PUT(HDRP(prev_blk), PACK(combined_size, 1));
+            PUT(FTRP(prev_blk), PACK(combined_size, 1));
+        }
+        return prev_blk;
+    }
+
+    // 3. prev + next block 모두 free라면 3개 병합
+    if (!prev_alloc && !next_alloc && (prev_size + old_size + next_size) >= asize) {
+        delete_free_block(prev_blk);
+        delete_free_block(next_blk);
+        size_t combined_size = prev_size + old_size + next_size;
+
+        // 데이터 이동
+        memmove(prev_blk, ptr, (old_size - DSIZE < size) ? (old_size - DSIZE) : size);
+
+        // 분할 가능하면 분할
+        if ((combined_size - asize) >= (2 * DSIZE)) 
+        {
+            PUT(HDRP(prev_blk), PACK(asize, 1));
+            PUT(FTRP(prev_blk), PACK(asize, 1));
+            char *next_new_blk = NEXT_BLKP(prev_blk);
+            PUT(HDRP(next_new_blk), PACK(combined_size - asize, 0));
+            PUT(FTRP(next_new_blk), PACK(combined_size - asize, 0));
+            insert_free_block(next_new_blk);
+        } 
+        else 
+        {
+            PUT(HDRP(prev_blk), PACK(combined_size, 1));
+            PUT(FTRP(prev_blk), PACK(combined_size, 1));
+        }
+        return prev_blk;
+    }
+
+    // 4. 확장 불가: 새로 할당
     void *newptr = mm_malloc(size);
 
     if (newptr == NULL) return NULL;
 
-    size_t copySize = (size < old_size) ? size : old_size;
-    memcpy(newptr, ptr, copySize); // memcpy : 메모리 영역을 "복사"하는 함수 memcpy(목적지_주소, 원본_주소, 복사_크기);
-    
+    size_t copySize = (old_size - DSIZE < size) ? (old_size - DSIZE) : size;
+    memcpy(newptr, ptr, copySize);
     mm_free(ptr);
+
     return newptr;
 }
