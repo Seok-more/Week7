@@ -32,6 +32,7 @@
 #define BIN_MIN_SIZE   16                  // 최소 bin size
 #define BIN_MAX_SIZE   512                 // 최대 bin size (마지막 bin 크기, 실제 bin_sizes 배열에서 확인)
 #define MIN_BLOCK_SIZE (WSIZE + WSIZE + WSIZE + WSIZE) // 헤더 + pred + succ + 푸터 = 4*WSIZE
+
 // -----------------------------------------
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

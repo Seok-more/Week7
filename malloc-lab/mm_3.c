@@ -549,7 +549,8 @@ void *mm_realloc(void *ptr, size_t size)
     }
 
     // 3. prev + next block 모두 free라면 3개 병합
-    if (!prev_alloc && !next_alloc && (prev_size + old_size + next_size) >= asize) {
+    if (!prev_alloc && !next_alloc && (prev_size + old_size + next_size) >= asize) 
+    {
         delete_free_block(prev_blk);
         delete_free_block(next_blk);
         size_t combined_size = prev_size + old_size + next_size;
