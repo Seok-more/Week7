@@ -72,6 +72,7 @@ in-place realloc: 같은 bin이면 in-place, 아니면 새 할당 후 복사
 매크로 추가: BIN_COUNT, BIN_MIN_SIZE, BIN_MAX_SIZE 등 삽입
 최소 블록 크기, alignment 보장
 코드 구조 정리 및 최적화
+#include <stdio.h>
 
 
 /*
@@ -447,3 +448,31 @@ void *mm_realloc(void *ptr, size_t size)
     mm_free(ptr);
     return newptr;
 }
+
+| -----------| ---------------------- |
+| 0              | amptjp-bal.rep        |
+| 1              | cccp-bal.rep            |
+| 2              | cp-decl-bal.rep       |
+| 3              | expr-bal.rep            |
+| 4              | coalescing-bal.rep  |
+| 5              | random-bal.rep      |
+| 6              | random2-bal.rep    |
+| 7              | binary-bal.rep         |
+| 8              | binary2-bal.rep       |
+| 9              | realloc-bal.rep         |
+| 10            | realloc2-bal.rep       |
+
+
+
+| 구분                     | 방식                                               | 특징                                                                 |
+| ---------------------- | ------------------------------------------------ | ------------------------------------------------------------------ |
+| **메모리 관리 구조**          | **Segregated Free List**                         | 크기 구간별 bin 32개(`bins[]`) + `BIN_MAX_SIZE` 초과는 `large_listp`로 별도 관리 |
+| **Free List 연결**       | **Explicit Doubly Linked List**                  | Free 블록마다 `pred`, `succ` 포인터 포함해 이중 연결 리스트 구성                      |
+| **탐색 정책 (`find_fit`)** | **Best-Fit**                                     | 각 bin과 large list에서 크기 가장 근접한 블록 탐색, 완전 일치 시 조기 종료                 |
+| **삽입 정책**              | **주소 오름차순 삽입**                                   | 블록을 주소순으로 정렬해 리스트에 삽입 → coalesce 효율↑                               |
+| **할당 정책 (`place`)**    | **분할 시 최소 블록 크기 보장**                             | 남는 블록이 `MIN_BLOCK_SIZE` 이상일 때만 분할                                  |
+| **병합 정책 (`coalesce`)** | **즉시 병합**                                        | 인접한 free 블록과 즉시 병합 후 bin/large list 재삽입                            |
+| **힙 확장**               | `mem_sbrk()`                                     | fit 실패 시 `CHUNKSIZE`(고정 크기) 또는 요청 크기만큼 확장                          |
+| **블록 구조**              | Header + Footer + Payload (+ pred/succ for free) | Free 블록은 pred/succ 포인터 포함                                          |
+| **정렬 단위**              | 8바이트 (ALIGNMENT = 8)                             | 모든 블록 크기를 8바이트 단위로 정렬                                              |
+

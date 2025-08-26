@@ -290,56 +290,39 @@ void *mm_malloc(size_t size)
  */
 static void *find_fit(size_t asize)
 {
-    void *best = NULL;
-    size_t min_size = (size_t)-1;
-
     // 1) Large 요청이면 Large List에서 먼저 검색
     if (asize > BIN_MAX_SIZE) {
         void *bp = large_listp;
         while (bp) {
             size_t curr_size = GET_SIZE(HDRP(bp));
-            if (curr_size >= asize && curr_size < min_size) {
-                best = bp;
-                min_size = curr_size;
-                if (min_size == asize) break; // 완전 일치 시 조기종료
-            }
+            if (curr_size >= asize)
+                return bp; // 첫 번째로 맞는 block을 바로 반환
             bp = SUCC(bp);
         }
-        if (best) return best;
-        // fallback: bin에서도 혹시 큰 free가 남아있을 수 있으므로 탐색 (안전성)
     }
 
-    // 2) 작은 요청은 해당 bin부터 큰 bin까지 best-fit 탐색
+    // 2) 작은 요청은 해당 bin부터 큰 bin까지 first-fit 탐색
     int bin_start = find_bin(asize);
     for (int i = bin_start; i < BIN_COUNT; i++) {
         void *bp = bins[i].free_listp;
         while (bp) {
             size_t curr_size = GET_SIZE(HDRP(bp));
-            if (curr_size >= asize && curr_size < min_size) {
-                best = bp;
-                min_size = curr_size;
-                if (min_size == asize) break; // 완전 일치
-            }
+            if (curr_size >= asize)
+                return bp; // 바로 반환
             bp = SUCC(bp);
         }
-        if (best) break;
     }
     
-    // 3) 마지막으로 Large List도 한 번 더 확인 (작은 요청이라도 large 여유 블록이 있을 수 있음)
-    if (!best) {
-        void *bp = large_listp;
-        while (bp) {
-            size_t curr_size = GET_SIZE(HDRP(bp));
-            if (curr_size >= asize && curr_size < min_size) {
-                best = bp;
-                min_size = curr_size;
-                if (min_size == asize) break;
-            }
-            bp = SUCC(bp);
-        }
+    // 3) 마지막으로 Large List도 한 번 더 확인
+    void *bp = large_listp;
+    while (bp) {
+        size_t curr_size = GET_SIZE(HDRP(bp));
+        if (curr_size >= asize)
+            return bp;
+        bp = SUCC(bp);
     }
 
-    return best;
+    return NULL;
 }
 
 /*
