@@ -27,6 +27,9 @@ mm_2.o: mm_2.c mm.h memlib.h
 mm_2 : explicit
 mm_3 : 언리얼 참고 구현 해볼까
 
+1. Bin 크기/분포 촘촘하게 튜닝 (Unreal-style, fragmentation 줄이기)
+2. best-fit+주소순 탐색/분할 정책 엄격화 (남은 공간이 충분할 때만 분할)
+3. 큰 요청 별도 bin/large block list 관리 (BIN_MAX_SIZE 이상 요청시 별도 처리)
 
 
 Copilot: Disable 했음

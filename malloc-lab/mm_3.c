@@ -1,13 +1,13 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
+ * Explicit free list allocator with Unreal Engine Binned2-style bins + Large Block List (stable)
+ * - 여러 bin(사이즈 클래스)로 free list 관리 (BIN_COUNT: 32, bin_size: 16/24/32/40/48/56/64...512)
+ * - BIN_MAX_SIZE(=512) 초과 요청/블록은 별도의 Large Block List에서 관리 (사실상 추가 bin)
+ * - 각 bin/large list는 주소 오름차순 explicit free list 유지 (coalesce 용이)
+ * - 기존 explicit allocator의 주석, 스타일, 인터페이스, 매크로 최대한 유지
+ * - coalesce, realloc도 bin/large list 기준으로 재삽입
  *
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
- *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * NOTE: 이 파일은 사용자가 제공한 기반 코드 스타일/주석을 보존하며,
+ *       Large Block List를 "추가 bin"처럼 다루어 안정성을 높였습니다.
  */
 
 #include <stdio.h>
@@ -20,93 +20,189 @@
 #include "mm.h"
 #include "memlib.h"
 
-/*********************************************************
- * NOTE TO STUDENTS: Before you do anything else, please
- * provide your team information in the following struct.
- ********************************************************/
 team_t team = {
-    /* Team name */
-    "UnrealSegregated",
-    /* First member's full name */
+    "UnrealStyle",
     "Seok-more",
-    /* First member's email address */
     "wjstjrah2000@gmail.com",
-    /* Second member's full name (leave blank if none) */
     "",
-    /* Second member's email address (leave blank if none) */
     ""
 };
 
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
-
-/* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
-
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
 /////////////////////////////////
+// Unreal-style bins + Large list
 static char *heap_listp = NULL; // 힙의 첫 시작점(프롤로그 블록의 payload)을 가리킴
-static char *free_listp = NULL; // 힙에서 가장 처음에 있는 free 블록 주소 가리킴
-static void *free_bins[BIN_COUNT] = {0}; // 각 bin별 free list 헤드
+
+#ifndef BIN_COUNT
+#define BIN_COUNT 32
+#endif
+
+// Large 기준값(사용자 요청 asize와 free 블록 size 비교 모두에 사용)
+#ifndef BIN_MAX_SIZE
+#define BIN_MAX_SIZE 512
+#endif
+
+// pred/succ 매크로, 헤더/푸터 매크로 등은 기존 프로젝트의 mm.h에서 제공된다고 가정합니다.
+// 예시: PRED(bp), SUCC(bp), GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), NEXT_BLKP(bp), PREV_BLKP(bp),
+//       PACK(size, alloc), PUT(p, val), WSIZE, DSIZE, CHUNKSIZE, MIN_BLOCK_SIZE 등.
+
+typedef struct {
+    void *free_listp; // 각 bin의 head
+} Bin;
+
+// Unreal 스타일: bin 크기 분포를 더 촘촘하게(16,24,32,40,48,56,64,80,96,112,128,144,160,176,192,208,224,240,256,288,320,352,384,416,448,480,512)
+static size_t bin_sizes[BIN_COUNT] = {
+    16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208,
+    224, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 512, 512, 512, 512, 512
+};
+// 마지막 몇 개는 512로 채움(BIN_COUNT가 32개로 고정되어 있으므로)
+static Bin bins[BIN_COUNT];
+
+// Large Block List (BIN_MAX_SIZE 초과 블록용 별도 free list)
+static void *large_listp = NULL; // head
+
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
-//static void *find_fit(size_t asize);
+static void *find_fit(size_t asize);
 static void place(void *bp, size_t asize);
-static void insert_free_block(void *bp, int bin);
-static void delete_free_block(void *bp, int bin);
+static void insert_free_block(void *bp);
+static void delete_free_block(void *bp);
+
 static int find_bin(size_t size);
-static void *find_fit(size_t asize, int *bin_out);
+
+// Large list 전용(주소 오름차순 유지) — bins와 동일한 정책으로 구현
+static void insert_large_block(void *bp);
+static void delete_large_block(void *bp);
 /////////////////////////////////
 
-/*
- * find_bin - 크기에 맞는 bin 인덱스 반환
- */
-static int find_bin(size_t size)
-{
-    int bin = BIN_INDEX(size);
-    if (bin >= BIN_COUNT) bin = BIN_COUNT - 1;
-    return bin;
+/* Unreal 스타일 bin_sizes 초기화 (분포는 배열로 고정, 초기화는 free list만) */
+static void init_bin_sizes(void) {
+    for (int i = 0; i < BIN_COUNT; i++) {
+        bins[i].free_listp = NULL;
+    }
+    large_listp = NULL;
+}
+
+/* size에 맞는 bin index 반환 */
+static int find_bin(size_t size) {
+    for (int i = 0; i < BIN_COUNT; i++) {
+        if (size <= bin_sizes[i])
+            return i;
+    }
+    return BIN_COUNT - 1;
 }
 
 /*
- *  insert_free_block - free 블록을 가용 리스트에 추가, address order가 더 좋대
- *  - pred/succ를 항상 초기화한다.
- *  - 중복 삽입(이미 list에 있는 블록을 또 넣는 것) 방지.
+ *  insert_large_block - BIN_MAX_SIZE 초과 free 블록을 Large List에 추가 (주소 오름차순)
  */
-static void insert_free_block(void *bp, int bin)
+static void insert_large_block(void *bp)
 {
-    // pred/succ 항상 초기화
-    PRED(bp) = NULL;
-    SUCC(bp) = free_bins[bin];
+    void *prev = NULL;
+    void *now = large_listp;
 
-    // 중복삽입 방지: bp가 이미 list에 있으면 아무것도 하지 않음
-    // (실제 구현에서는 assert로 잡거나 skip, 여기서는 간단하게 처리)
-    if (free_bins[bin] == bp) return;
+    while (now != NULL && (char*)now < (char*)bp) {
+        prev = now;
+        now = SUCC(now);
+    }
 
-    if (free_bins[bin])
-        PRED(free_bins[bin]) = bp;
-    free_bins[bin] = bp;
+    PRED(bp) = prev;
+    SUCC(bp) = now;
+    if (now) PRED(now) = bp;
+    if (prev) SUCC(prev) = bp; else large_listp = bp;
 }
 
 /*
- *  delete_free_block - free 블록을 가용 리스트에서 제거
- *  - pred/succ를 항상 끊어준다.
- *  - bp가 list의 헤드일 때와 아닐 때 모두 안전하게 처리
+ *  delete_large_block - Large List에서 free 블록 제거
  */
-static void delete_free_block(void *bp, int bin)
+static void delete_large_block(void *bp)
 {
-    // bp가 free_bins[bin]의 헤드이면
-    if (free_bins[bin] == bp) {
-        free_bins[bin] = SUCC(bp);
-        if (SUCC(bp)) PRED(SUCC(bp)) = NULL;
+    if (bp == large_listp) {
+        large_listp = SUCC(bp);
+        if (large_listp) PRED(large_listp) = NULL;
     } else {
         if (PRED(bp)) SUCC(PRED(bp)) = SUCC(bp);
         if (SUCC(bp)) PRED(SUCC(bp)) = PRED(bp);
     }
-    // bp의 pred/succ 끊기
-    PRED(bp) = NULL;
-    SUCC(bp) = NULL;
+}
+
+/*
+ *  insert_free_block - free 블록을 해당 bin/large list의 가용 리스트에 추가, address order
+ */
+static void insert_free_block(void *bp)
+{
+    size_t size = GET_SIZE(HDRP(bp));
+
+    if (size > BIN_MAX_SIZE) {
+        insert_large_block(bp);
+        return;
+    }
+
+    int bin = find_bin(size);
+
+    void *prev = NULL;
+    void *now = bins[bin].free_listp;
+
+    // 주소 오름차순으로 탐색
+    while (now != NULL && (char*)now < (char*)bp)
+    {
+        prev = now;
+        now = SUCC(now);
+    }
+
+    // prev와 now 사이에 bp 삽입
+    PRED(bp) = prev;
+    SUCC(bp) = now;
+
+    if (now != NULL) {
+        PRED(now) = bp;
+    }
+
+    if (prev != NULL) {
+        SUCC(prev) = bp;
+    }
+    else {
+        bins[bin].free_listp = bp;
+    }
+}
+
+/*
+ *  delete_free_block - free 블록을 해당 bin/large list의 가용 리스트에서 제거
+ */
+static void delete_free_block(void *bp)
+{
+    size_t size = GET_SIZE(HDRP(bp));
+
+    if (size > BIN_MAX_SIZE) {
+        delete_large_block(bp);
+        return;
+    }
+
+    int bin = find_bin(size);
+
+    if (bp == bins[bin].free_listp)
+    {
+        bins[bin].free_listp = SUCC(bp);
+        if (bins[bin].free_listp != NULL)
+        {
+            PRED(bins[bin].free_listp) = NULL;
+        }
+    }
+    else
+    {
+        if (PRED(bp) != NULL)
+        {
+            SUCC(PRED(bp)) = SUCC(bp);
+        }
+
+        if (SUCC(bp) != NULL)
+        {
+            PRED(SUCC(bp)) = PRED(bp);
+        }
+    }
 }
 
 /*
@@ -114,24 +210,19 @@ static void delete_free_block(void *bp, int bin)
  */
 int mm_init(void)
 {
+    // Unreal-style bin sizes, free lists 초기화
+    init_bin_sizes();
+
     // 1. 초기 빈 힙 생성 (4워드 메모리 할당)
     if ((heap_listp = mem_sbrk(4*WSIZE)) == (void*)-1)  return -1;
 
-    // 2. 빈 힙에 프롤로그 블록과 에필로그 헤더를 추가 -> 프롤로그 불록은 힙의 맨 앞부분에 존재하는 allocated된 더미 블록
-    // 초기 힙 구조 : [정렬 패딩][프롤로그 헤더][프롤로그 푸터][첫 가용 블록 ...][에필로그 헤더]
-    //              ↑         ↑            ↑            ↑               ↑
-    //        heap_listp heap_listp+WSIZE heap_listp+2*WSIZE heap_listp+3*WSIZE ...   
-
+    // 2. 빈 힙에 프롤로그 블록과 에필로그 헤더를 추가
     PUT(heap_listp, 0);                          // 정렬 패딩
     PUT(heap_listp + (1*WSIZE), PACK(DSIZE, 1)); // 프롤로그 헤더
     PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); // 프롤로그 푸터
     PUT(heap_listp + (3*WSIZE), PACK(0, 1));     // 에필로그 헤더
 
-    heap_listp += (2*WSIZE); // heap_listp를 첫 가용 블록의 payload 주소로 이동(보통 payload 기준으로 블록포인터 잡음)
-
-    // free_bins 초기화
-    for (int i = 0; i < BIN_COUNT; ++i)
-        free_bins[i] = NULL;
+    heap_listp += (2*WSIZE); // 첫 가용 블록의 payload 주소로 이동
 
     // 3. 빈 힙을 CHUNKSIZE 크기의 가용 블록으로 확장 
     if (extend_heap(CHUNKSIZE/WSIZE) == NULL) return -1;
@@ -150,7 +241,7 @@ static void *extend_heap(size_t words)
     // 항상 8바이트 단위로 정렬, 짝수 워드 할당
     size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
     if ((long)(bp = mem_sbrk(size)) == -1) return NULL;
-
+    
     // 새 가용 블록의 헤더/푸터, 새로운 에필로그 헤더 초기화
     PUT(HDRP(bp), PACK(size, 0));         // 헤더: 크기, free
     PUT(FTRP(bp), PACK(size, 0));         // 푸터: 크기, free
@@ -161,148 +252,180 @@ static void *extend_heap(size_t words)
 }
 
 /*
- * mm_malloc - segregated bin에서 first-fit으로 할당
+ * mm_malloc - bin/large list별로 asize에 맞는 블록 탐색, 없으면 힙 확장
  */
 void *mm_malloc(size_t size)
 {
-    size_t asize;
-    size_t extendsize;
+    size_t asize;         // 실제 할당 블록 크기 (헤더/푸터 포함, 정렬)
+    size_t extendsize;    // fit이 없을 때 힙 확장 크기
     char *bp;
-    int bin;
 
     if (size == 0) return NULL;
 
-    if (size <= DSIZE)
-        asize = 2 * DSIZE;
-    else
-        asize = ALIGN(size + DSIZE);
+    // 1. 최소 블록 크기(헤더+payload+푸터) 맞추고 8바이트 단위로 정렬
+    if (size <= DSIZE) {
+        asize = 2 * DSIZE; // 최소 16바이트
+    } else {
+        asize = ALIGN(size + DSIZE); // Header + payload + footer
+    }
 
-    if ((bp = find_fit(asize, &bin)) != NULL)
-    {
+    // 2. bin/large list에서 asize에 맞는 블록 탐색
+    if ((bp = find_fit(asize)) != NULL) {
         place(bp, asize);
         return bp;
     }
 
-    extendsize = MAX(asize, CHUNKSIZE);
+    // 3. 못 찾으면 힙 확장 후 새 블록 할당 (Large 요청이면 asize만큼 확장)
+    extendsize = (asize > CHUNKSIZE) ? asize : CHUNKSIZE;
     if ((bp = extend_heap(extendsize / WSIZE)) == NULL) return NULL;
+
     place(bp, asize);
     return bp;
 }
 
 /*
- * find_fit - 요구 asize 이상의 free block을 bin에서 first-fit으로 찾음
+ * find_fit - bin/large list에서 asize 이상인 best-fit 블록 탐색
+ * - BIN_MAX_SIZE 초과 요청은 Large List 먼저 탐색 (best-fit)
+ * - 실패 시 일반 bin들도 탐색(fallback) — 안정성/재사용률 향상
  */
-static void *find_fit(size_t asize, int *bin_out)
+static void *find_fit(size_t asize)
 {
-    int bin = find_bin(asize);
+    void *best = NULL;
+    size_t min_size = (size_t)-1;
 
-    // 작은 bin부터 큰 bin까지 탐색
-    for (int i = bin; i < BIN_COUNT; ++i)
-    {
-        void *bp = free_bins[i];
-        int cnt = 0;
-        while (bp)
-        {
-            // 무한루프 방지: bp == SUCC(bp)면 break
-            if (bp == SUCC(bp)) break;
-            if (GET_SIZE(HDRP(bp)) >= asize)
-            {
-                if (bin_out) *bin_out = i;
-                return bp;
+    // 1) Large 요청이면 Large List에서 먼저 검색
+    if (asize > BIN_MAX_SIZE) {
+        void *bp = large_listp;
+        while (bp) {
+            size_t curr_size = GET_SIZE(HDRP(bp));
+            if (curr_size >= asize && curr_size < min_size) {
+                best = bp;
+                min_size = curr_size;
+                if (min_size == asize) break; // 완전 일치 시 조기종료
             }
             bp = SUCC(bp);
-            cnt++;
-            if (cnt > 10000) break; // 비정상 루프 방어 (실제 프로그램에서는 assert)
+        }
+        if (best) return best;
+        // fallback: bin에서도 혹시 큰 free가 남아있을 수 있으므로 탐색 (안전성)
+    }
+
+    // 2) 작은 요청은 해당 bin부터 큰 bin까지 best-fit 탐색
+    int bin_start = find_bin(asize);
+    for (int i = bin_start; i < BIN_COUNT; i++) {
+        void *bp = bins[i].free_listp;
+        while (bp) {
+            size_t curr_size = GET_SIZE(HDRP(bp));
+            if (curr_size >= asize && curr_size < min_size) {
+                best = bp;
+                min_size = curr_size;
+                if (min_size == asize) break; // 완전 일치
+            }
+            bp = SUCC(bp);
+        }
+        if (best) break;
+    }
+    
+    // 3) 마지막으로 Large List도 한 번 더 확인 (작은 요청이라도 large 여유 블록이 있을 수 있음)
+    if (!best) {
+        void *bp = large_listp;
+        while (bp) {
+            size_t curr_size = GET_SIZE(HDRP(bp));
+            if (curr_size >= asize && curr_size < min_size) {
+                best = bp;
+                min_size = curr_size;
+                if (min_size == asize) break;
+            }
+            bp = SUCC(bp);
         }
     }
-    return NULL;
+
+    return best;
 }
 
 /*
- * place - bp 위치에 asize만큼 할당, 분할 시 남은 부분을 올바른 bin에 삽입
+ * place - bp 위치의 free 블록에 asize만큼 할당, 필요하면 분할해버림
+ * - 엄격한 분할 정책 적용: 남은 크기가 MIN_BLOCK_SIZE(헤더+푸터+pred+succ) 이상일 때만 분할
+ * - 너무 작은 블록(헤더+푸터+pred+succ+payload)이 생기지 않도록 방지
  */
 static void place(void *bp, size_t asize)
 {
-    size_t totalsize = GET_SIZE(HDRP(bp));
-    int bin = find_bin(totalsize);
-    delete_free_block(bp, bin);
+    size_t totalsize = GET_SIZE(HDRP(bp)); // 현재 가용 블록의 전체 크기
 
-    if ((totalsize - asize) >= (2 * DSIZE))
+    delete_free_block(bp); // 현재 속한 리스트(bin 또는 large)에서 제거
+
+    // 분할 정책: 남은 크기가 MIN_BLOCK_SIZE 이상이어야 분할
+    if ((totalsize - asize) >= MIN_BLOCK_SIZE)
     {
+        // 블록 분할
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
 
-        char *next_bp = NEXT_BLKP(bp);
-        PUT(HDRP(next_bp), PACK(totalsize - asize, 0));
-        PUT(FTRP(next_bp), PACK(totalsize - asize, 0));
-        int next_bin = find_bin(totalsize - asize);
-        insert_free_block(next_bp, next_bin);
+        char *next_bp = NEXT_BLKP(bp); // 남은 영역의 다음 블록 payload 주소
+        PUT(HDRP(next_bp), PACK(totalsize - asize, 0)); // 남은 영역 헤더: 남은 크기, free
+        PUT(FTRP(next_bp), PACK(totalsize - asize, 0)); // 남은 영역 푸터: 남은 크기, free
+
+        insert_free_block(next_bp); // 크기에 맞는 bin 또는 large list에 삽입
+
     }
     else
     {
+        // 그냥 전부 할당
         PUT(HDRP(bp), PACK(totalsize, 1));
         PUT(FTRP(bp), PACK(totalsize, 1));
     }
 }
 
 /*
- * coalesce - 인접 free 블록 병합 (Unreal: 병합 후 적절 bin에 삽입)
- * - 병합된 블록의 pred/succ를 항상 초기화
+ * coalesce - 인접 free 블록을 병합. 병합된 블록의 payload 포인터 반환
+ * 병합된 블록은 bin/large list에 재삽입
  */
 static void *coalesce(void *bp)
 {
-    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-    size_t size = GET_SIZE(HDRP(bp));
+    size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp))); // 이전 블록 할당 여부
+    size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp))); // 다음 블록 할당 여부
+    size_t size = GET_SIZE(HDRP(bp));                   // 현재 블록 크기
 
-    int bin;
-    if (prev_alloc && next_alloc) {
-        bin = find_bin(size);
-        insert_free_block(bp, bin);
+    if (prev_alloc && next_alloc)
+    {
+        insert_free_block(bp);
         return bp;
     }
-    else if (prev_alloc && !next_alloc) {
+    else if (prev_alloc && !next_alloc)
+    {
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        int next_bin = find_bin(GET_SIZE(HDRP(NEXT_BLKP(bp))));
-        delete_free_block(NEXT_BLKP(bp), next_bin);
+        delete_free_block(NEXT_BLKP(bp));
 
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
-        bin = find_bin(size);
-        insert_free_block(bp, bin);
+        insert_free_block(bp);
     }
-    else if (!prev_alloc && next_alloc) {
+    else if (!prev_alloc && next_alloc)
+    {
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-        int prev_bin = find_bin(GET_SIZE(HDRP(PREV_BLKP(bp))));
         bp = PREV_BLKP(bp);
-        delete_free_block(bp, prev_bin);
+        delete_free_block(bp);
 
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
-        bin = find_bin(size);
-        insert_free_block(bp, bin);
+        insert_free_block(bp);
     }
-    else {
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
-        int prev_bin = find_bin(GET_SIZE(HDRP(PREV_BLKP(bp))));
-        int next_bin = find_bin(GET_SIZE(HDRP(NEXT_BLKP(bp))));
-        delete_free_block(PREV_BLKP(bp), prev_bin);
-        delete_free_block(NEXT_BLKP(bp), next_bin);
-
+    else
+    {
+        size += ( GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp))) );
+        delete_free_block(NEXT_BLKP(bp));
         bp = PREV_BLKP(bp);
+        delete_free_block(bp);
+
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
-        bin = find_bin(size);
-        insert_free_block(bp, bin);
+        insert_free_block(bp);
     }
-    // 병합 후 항상 pred/succ 초기화
-    PRED(bp) = NULL;
-    SUCC(bp) = NULL;
+
     return bp;
 }
 
 /*
- * mm_free - free block 병합 후 bin에 삽입
+ * mm_free - 블록을 해제하고 인접 free 블록과 병합
  */
 void mm_free(void *bp)
 {
@@ -313,49 +436,60 @@ void mm_free(void *bp)
 }
 
 /*
- * mm_realloc - in-place 확장/축소, 아니면 새로 할당 후 복사
+ * mm_realloc - 블록 크기 재조정 (새 블록 할당, 데이터 복사, 기존 블록 해제)
+ * 병합 확장, 분할 모두 bin/large list별 관리
  */
-void *mm_realloc(void *ptr, size_t size)
+void *mm_realloc(void *ptr, size_t size) 
 {
     if (ptr == NULL) return mm_malloc(size);
-    if (size == 0) { mm_free(ptr); return NULL; }
+
+    if (size == 0) 
+    { 
+        mm_free(ptr); 
+        return NULL; 
+    }
 
     size_t old_size = GET_SIZE(HDRP(ptr));
     size_t asize = (size <= DSIZE) ? 2 * DSIZE : ALIGN(size + DSIZE);
 
-    // 축소: in-place 분할
-    if (asize < old_size && (old_size - asize) >= (2 * DSIZE))
+    // 축소
+    if (asize < old_size && (old_size - asize) >= MIN_BLOCK_SIZE) 
     {
         PUT(HDRP(ptr), PACK(asize, 1));
         PUT(FTRP(ptr), PACK(asize, 1));
+
         char *next_blk = NEXT_BLKP(ptr);
         PUT(HDRP(next_blk), PACK(old_size - asize, 0));
         PUT(FTRP(next_blk), PACK(old_size - asize, 0));
-        int bin = find_bin(old_size - asize);
-        insert_free_block(next_blk, bin);
+        insert_free_block(next_blk);
+
         return ptr;
     }
 
-    // in-place 확장: 다음 블록이 free이고 충분하다면 병합 후 사용
+    void *prev_blk = PREV_BLKP(ptr);
+    size_t prev_alloc = GET_ALLOC(FTRP(prev_blk));
+    size_t prev_size = GET_SIZE(HDRP(prev_blk));
+
     void *next_blk = NEXT_BLKP(ptr);
     size_t next_alloc = GET_ALLOC(HDRP(next_blk));
     size_t next_size = GET_SIZE(HDRP(next_blk));
-    if (!next_alloc && (old_size + next_size) >= asize)
+
+    // 1. next block만으로 확장
+    if (!next_alloc && (old_size + next_size) >= asize) 
     {
-        int next_bin = find_bin(next_size);
-        delete_free_block(next_blk, next_bin);
+        delete_free_block(next_blk);
         size_t combined_size = old_size + next_size;
-        if ((combined_size - asize) >= (2 * DSIZE))
+
+        if ((combined_size - asize) >= MIN_BLOCK_SIZE) 
         {
             PUT(HDRP(ptr), PACK(asize, 1));
             PUT(FTRP(ptr), PACK(asize, 1));
             char *next_new_blk = NEXT_BLKP(ptr);
             PUT(HDRP(next_new_blk), PACK(combined_size - asize, 0));
             PUT(FTRP(next_new_blk), PACK(combined_size - asize, 0));
-            int bin = find_bin(combined_size - asize);
-            insert_free_block(next_new_blk, bin);
-        }
-        else
+            insert_free_block(next_new_blk);
+        } 
+        else 
         {
             PUT(HDRP(ptr), PACK(combined_size, 1));
             PUT(FTRP(ptr), PACK(combined_size, 1));
@@ -363,11 +497,67 @@ void *mm_realloc(void *ptr, size_t size)
         return ptr;
     }
 
-    // 새로 할당하여 복사
+    // 2. prev block만으로 확장
+    if (!prev_alloc && (prev_size + old_size) >= asize) 
+    {
+        delete_free_block(prev_blk);
+        size_t combined_size = prev_size + old_size;
+
+        // payload 복사 시 헤더/푸터 제외
+        size_t copy_n = (old_size - DSIZE < size) ? (old_size - DSIZE) : size;
+        memmove(prev_blk, ptr, copy_n);
+
+        if ((combined_size - asize) >= MIN_BLOCK_SIZE) 
+        {
+            PUT(HDRP(prev_blk), PACK(asize, 1));
+            PUT(FTRP(prev_blk), PACK(asize, 1));
+            char *next_new_blk = NEXT_BLKP(prev_blk);
+            PUT(HDRP(next_new_blk), PACK(combined_size - asize, 0));
+            PUT(FTRP(next_new_blk), PACK(combined_size - asize, 0));
+            insert_free_block(next_new_blk);
+        } 
+        else 
+        {
+            PUT(HDRP(prev_blk), PACK(combined_size, 1));
+            PUT(FTRP(prev_blk), PACK(combined_size, 1));
+        }
+        return prev_blk;
+    }
+
+    // 3. prev + next block 모두 free라면 3개 병합
+    if (!prev_alloc && !next_alloc && (prev_size + old_size + next_size) >= asize) {
+        delete_free_block(prev_blk);
+        delete_free_block(next_blk);
+        size_t combined_size = prev_size + old_size + next_size;
+
+        size_t copy_n = (old_size - DSIZE < size) ? (old_size - DSIZE) : size;
+        memmove(prev_blk, ptr, copy_n);
+
+        if ((combined_size - asize) >= MIN_BLOCK_SIZE) 
+        {
+            PUT(HDRP(prev_blk), PACK(asize, 1));
+            PUT(FTRP(prev_blk), PACK(asize, 1));
+            char *next_new_blk = NEXT_BLKP(prev_blk);
+            PUT(HDRP(next_new_blk), PACK(combined_size - asize, 0));
+            PUT(FTRP(next_new_blk), PACK(combined_size - asize, 0));
+            insert_free_block(next_new_blk);
+        } 
+        else 
+        {
+            PUT(HDRP(prev_blk), PACK(combined_size, 1));
+            PUT(FTRP(prev_blk), PACK(combined_size, 1));
+        }
+        return prev_blk;
+    }
+
+    // 4. 확장 불가: 새로 할당
     void *newptr = mm_malloc(size);
+
     if (newptr == NULL) return NULL;
+
     size_t copySize = (old_size - DSIZE < size) ? (old_size - DSIZE) : size;
     memcpy(newptr, ptr, copySize);
     mm_free(ptr);
+
     return newptr;
 }

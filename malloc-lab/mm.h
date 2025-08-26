@@ -28,12 +28,9 @@
 #define SUCC(bp) (*(void **)((char *)(bp) + WSIZE))
 
 // --------mm_3.c 언리얼 스타일 전용 매크로 --------
-#define BIN_COUNT      32                  // bin 개수 (16, 32, ..., 16*BIN_COUNT)
+#define BIN_COUNT      32                  // bin 개수 (실제 분포는 mm_3.c에서 정의)
 #define BIN_MIN_SIZE   16                  // 최소 bin size
-#define BIN_MAX_SIZE   (BIN_MIN_SIZE * BIN_COUNT) // 최대 bin size
-
-#define BIN_INDEX(sz)  (((sz) <= BIN_MIN_SIZE) ? 0 : (((sz) - 1) / BIN_MIN_SIZE))
-
+#define BIN_MAX_SIZE   512                 // 최대 bin size (마지막 bin 크기, 실제 bin_sizes 배열에서 확인)
 #define MIN_BLOCK_SIZE (WSIZE + WSIZE + WSIZE + WSIZE) // 헤더 + pred + succ + 푸터 = 4*WSIZE = 32B (8B 시스템 기준)
 // -------------------------------------------------------------
 

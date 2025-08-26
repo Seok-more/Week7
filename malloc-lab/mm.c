@@ -26,7 +26,7 @@
  ********************************************************/
 team_t team = {
     /* Team name */
-    "Implicit: first-fit, just realloc",
+    "Implicit: ",
     /* First member's full name */
     "Seok-more",
     /* First member's email address */
