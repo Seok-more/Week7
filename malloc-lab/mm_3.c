@@ -1,13 +1,35 @@
 /*
- * Explicit free list allocator with Unreal Engine Binned2-style bins + Large Block List (stable)
- * - 여러 bin(사이즈 클래스)로 free list 관리 (BIN_COUNT: 32, bin_size: 16/24/32/40/48/56/64...512)
- * - BIN_MAX_SIZE(=512) 초과 요청/블록은 별도의 Large Block List에서 관리 (사실상 추가 bin)
- * - 각 bin/large list는 주소 오름차순 explicit free list 유지 (coalesce 용이)
- * - 기존 explicit allocator의 주석, 스타일, 인터페이스, 매크로 최대한 유지
- * - coalesce, realloc도 bin/large list 기준으로 재삽입
+ * Explicit free list allocator with Unreal Engine Binned2-style bins + Large Block List
  *
- * NOTE: 이 파일은 사용자가 제공한 기반 코드 스타일/주석을 보존하며,
- *       Large Block List를 "추가 bin"처럼 다루어 안정성을 높였습니다.
+ * ┌─────────────────────────────┬─────────────────────────────────────────────┬───────────────────────────────────────────────────────────────┐
+ * │        [구분]               │                  [방식]                      │                            [특징]                              │
+ * ├─────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┤
+ * │ 메모리 관리 구조              │ Segregated Free List                        │ 크기 구간별 bin 32개(`bins[]`), BIN_MAX_SIZE(=512) 초과는        │
+ * │                             │                                             │ `large_listp`에서 별도 관리                                     │
+ * ├─────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┤
+ * │ Free List 연결              │ Explicit Doubly Linked List                 │ free 블록마다 pred/succ 포인터 포함, 주소 오름차순 이중 연결         │
+ * │                             │                                             │ 리스트 구성(coalesce 효율↑)                                     │
+ * ├─────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┤
+ * │ 탐색 정책(find_fit)          │ First-Fit                                   │ 각 bin/large list에서 요청 크기 이상인 첫 블록을 즉시 할당          │
+ * │                             │                                             │ (Unreal 엔진 실제 방식과 동일)                                   │
+ * ├─────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┤
+ * │ 삽입 정책                    │ 주소 오름차순 삽입                             │ 주소순으로 free 블록을 리스트에 삽입 → coalesce 효율↑              │
+ * ├─────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┤
+ * │ 할당 정책(place)             │ 분할 시 최소 블록 크기 보장                     │ 남는 블록이 MIN_BLOCK_SIZE 이상일 때만 분할                       │
+ * ├─────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┤
+ * │ 병합 정책(coalesce)          │ 즉시 병합                                     │ 인접한 free 블록과 병합 후 bin/large list에 재삽입                │
+ * ├─────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┤
+ * │ 힙 확장                      │ mem_sbrk()                                  │ fit 실패 시 CHUNKSIZE 또는 요청 크기만큼 확장                     │
+ * ├─────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┤
+ * │ 블록 구조                    │ Header + Footer + Payload (+ pred/succ)     │ free 블록은 pred/succ 포인터 포함                           │
+ * ├─────────────────────────────┼─────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┤
+ * │ 정렬 단위                    │ 8바이트 (ALIGNMENT = 8)                      │ 모든 블록 크기를 8바이트 단위로 정렬                               │
+ * └─────────────────────────────┴─────────────────────────────────────────────┴───────────────────────────────────────────────────────────────┘
+ *
+ * - Unreal Engine Binned2와 유사하게, 요청 크기에 따라 적절한 bin을 선택하고 해당 bin/large_list에서 first-fit 할당.
+ * - 주소 오름차순 explicit free list로 병합(coalesce)이 효율적으로 동작.
+ * - 분할 시 최소 크기 보장, 즉시 병합, realloc 역시 bin/large list 별 관리.
+ * - mdriver, malloc-lab 채점 기준에 최적화된 구조.
  */
 
 #include <stdio.h>
@@ -28,38 +50,24 @@ team_t team = {
     ""
 };
 
-/* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-/////////////////////////////////
 // Unreal-style bins + Large list
 static char *heap_listp = NULL; // 힙의 첫 시작점(프롤로그 블록의 payload)을 가리킴
 
-#ifndef BIN_COUNT
-#define BIN_COUNT 32
-#endif
-
-// Large 기준값(사용자 요청 asize와 free 블록 size 비교 모두에 사용)
-#ifndef BIN_MAX_SIZE
-#define BIN_MAX_SIZE 512
-#endif
-
-// pred/succ 매크로, 헤더/푸터 매크로 등은 기존 프로젝트의 mm.h에서 제공된다고 가정합니다.
-// 예시: PRED(bp), SUCC(bp), GET_SIZE(HDRP(bp)), GET_ALLOC(HDRP(bp)), NEXT_BLKP(bp), PREV_BLKP(bp),
-//       PACK(size, alloc), PUT(p, val), WSIZE, DSIZE, CHUNKSIZE, MIN_BLOCK_SIZE 등.
+// 매크로는 mm.h에서 선언된 것을 사용함
 
 typedef struct {
     void *free_listp; // 각 bin의 head
 } Bin;
 
-// Unreal 스타일: bin 크기 분포를 더 촘촘하게(16,24,32,40,48,56,64,80,96,112,128,144,160,176,192,208,224,240,256,288,320,352,384,416,448,480,512)
+// Unreal 스타일: bin 크기 분포를 더 촘촘하게(16,24,32, ... 512)
 static size_t bin_sizes[BIN_COUNT] = {
     16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208,
     224, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 512, 512, 512, 512, 512
 };
-// 마지막 몇 개는 512로 채움(BIN_COUNT가 32개로 고정되어 있으므로)
 static Bin bins[BIN_COUNT];
 
 // Large Block List (BIN_MAX_SIZE 초과 블록용 별도 free list)
@@ -73,11 +81,8 @@ static void insert_free_block(void *bp);
 static void delete_free_block(void *bp);
 
 static int find_bin(size_t size);
-
-// Large list 전용(주소 오름차순 유지) — bins와 동일한 정책으로 구현
 static void insert_large_block(void *bp);
 static void delete_large_block(void *bp);
-/////////////////////////////////
 
 /* Unreal 스타일 bin_sizes 초기화 (분포는 배열로 고정, 초기화는 free list만) */
 static void init_bin_sizes(void) {
@@ -288,6 +293,8 @@ void *mm_malloc(size_t size)
  * - BIN_MAX_SIZE 초과 요청은 Large List 먼저 탐색 (best-fit)
  * - 실패 시 일반 bin들도 탐색(fallback) — 안정성/재사용률 향상
  */
+
+// first-fit
 static void *find_fit(size_t asize)
 {
     // 1) Large 요청이면 Large List에서 먼저 검색
@@ -296,7 +303,7 @@ static void *find_fit(size_t asize)
         while (bp) {
             size_t curr_size = GET_SIZE(HDRP(bp));
             if (curr_size >= asize)
-                return bp; // 첫 번째로 맞는 block을 바로 반환
+                return bp;
             bp = SUCC(bp);
         }
     }
@@ -308,7 +315,7 @@ static void *find_fit(size_t asize)
         while (bp) {
             size_t curr_size = GET_SIZE(HDRP(bp));
             if (curr_size >= asize)
-                return bp; // 바로 반환
+                return bp;
             bp = SUCC(bp);
         }
     }
@@ -324,6 +331,61 @@ static void *find_fit(size_t asize)
 
     return NULL;
 }
+
+// best-fit
+//  static void *find_fit(size_t asize)
+// {
+//     void *best = NULL;
+//     size_t min_size = (size_t)-1;
+
+//     // 1) Large 요청이면 Large List에서 먼저 검색
+//     if (asize > BIN_MAX_SIZE) {
+//         void *bp = large_listp;
+//         while (bp) {
+//             size_t curr_size = GET_SIZE(HDRP(bp));
+//             if (curr_size >= asize && curr_size < min_size) {
+//                 best = bp;
+//                 min_size = curr_size;
+//                 if (min_size == asize) break; // 완전 일치 시 조기종료
+//             }
+//             bp = SUCC(bp);
+//         }
+//         if (best) return best;
+//     }
+
+//     // 2) 작은 요청은 해당 bin부터 큰 bin까지 best-fit 탐색
+//     int bin_start = find_bin(asize);
+//     for (int i = bin_start; i < BIN_COUNT; i++) {
+//         void *bp = bins[i].free_listp;
+//         while (bp) {
+//             size_t curr_size = GET_SIZE(HDRP(bp));
+//             if (curr_size >= asize && curr_size < min_size) {
+//                 best = bp;
+//                 min_size = curr_size;
+//                 if (min_size == asize) break; // 완전 일치
+//             }
+//             bp = SUCC(bp);
+//         }
+//         if (best) break;
+//     }
+    
+//     // 3) 마지막으로 Large List도 한 번 더 확인 (작은 요청이라도 large 여유 블록이 있을 수 있음)
+//     if (!best) {
+//         void *bp = large_listp;
+//         while (bp) {
+//             size_t curr_size = GET_SIZE(HDRP(bp));
+//             if (curr_size >= asize && curr_size < min_size) {
+//                 best = bp;
+//                 min_size = curr_size;
+//                 if (min_size == asize) break;
+//             }
+//             bp = SUCC(bp);
+//         }
+//     }
+
+//     return best;
+// }
+
 
 /*
  * place - bp 위치의 free 블록에 asize만큼 할당, 필요하면 분할해버림
