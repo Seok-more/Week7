@@ -33,7 +33,7 @@
  * - first-fit(빠른 탐색, 실 Unreal 스타일)과 best-fit(대형 블록 효율) 동시 적용.
  * - 모든 free 블록은 이중 연결 리스트로 관리, coalesce와 분할 효율적.
  * - realloc/병합/분할/확장 모두 bin/large 관리 정책에 따라 동작.
- * - Unreal의 멀티스레드 TLS 캐시, OS 페이지 캐시, PoolInfo, hash mapping, 실시간 bin 튜닝, debug/profiler 기능 등은 미구현
+ * - 멀티스레드 Thread Local Cache(TLS), OS 페이지 캐시, PoolInfo, hash mapping, 실시간 bin 튜닝, debug/profiler 기능 등은 미구현
  */
 
 #include <stdio.h>
@@ -60,7 +60,6 @@ team_t team =
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
 // Unreal-style bins + Large list
-static char *heap_listp = NULL; // 힙의 첫 시작점(프롤로그 블록의 payload)을 가리킴
 
 typedef struct 
 {
@@ -77,8 +76,9 @@ static size_t bin_sizes[BIN_COUNT] =
 static Bin bins[BIN_COUNT];
 
 // Large Block List (BIN_MAX_SIZE 초과 블록용 별도 free list)
-static void *large_listp = NULL; // head
+static void *large_listp = NULL; 
 
+static char *heap_listp = NULL; 
 static void *extend_heap(size_t words);
 static void *coalesce(void *bp);
 static void *find_fit(size_t asize);
@@ -90,7 +90,7 @@ static int find_bin(size_t size);
 static void insert_large_block(void *bp);
 static void delete_large_block(void *bp);
 
-/* Unreal 스타일 bin_sizes 초기화 (분포는 배열로 고정, 초기화는 free list만) */
+// bin sizes초기화 (분포는 배열, 초기화는 free list만)
 static void init_bin_sizes(void) 
 {
     for (int i = 0; i < BIN_COUNT; i++) 
@@ -100,20 +100,21 @@ static void init_bin_sizes(void)
     large_listp = NULL;
 }
 
-/* size에 맞는 bin index 반환 */
+// size에 맞는 bin index 반환
 static int find_bin(size_t size) 
 {
     for (int i = 0; i < BIN_COUNT; i++) 
     {
         if (size <= bin_sizes[i])
+        {
             return i;
+        }
     }
     return BIN_COUNT - 1;
 }
 
-/*
- *  insert_large_block - BIN_MAX_SIZE 초과 free 블록을 Large List에 추가 (주소 오름차순)
- */
+
+// BIN_MAX_SIZE 초과 free 블록을 Large List에 추가 (address order임)
 static void insert_large_block(void *bp)
 {
     void *prev = NULL;
@@ -127,13 +128,25 @@ static void insert_large_block(void *bp)
 
     PRED(bp) = prev;
     SUCC(bp) = now;
-    if (now) PRED(now) = bp;
-    if (prev) SUCC(prev) = bp; else large_listp = bp;
+
+    if (now) 
+    {
+        PRED(now) = bp;
+    }
+
+    if (prev) 
+    {
+        SUCC(prev) = bp; 
+    }
+    else 
+    {
+        large_listp = bp;
+    }
+        
 }
 
-/*
- *  delete_large_block - Large List에서 free 블록 제거
- */
+
+// Large List에서 free 블록 제거
 static void delete_large_block(void *bp)
 {
     if (bp == large_listp) 
@@ -161,7 +174,7 @@ static void delete_large_block(void *bp)
 
 /*
  *  insert_free_block - free 블록을 해당 bin/large list의 가용 리스트에 추가
- *  개선: small bin LIFO 삽입, large list 주소 오름차순 유지
+ *  + small bin -> LIFO 삽입, large list -> address order
  */
 static void insert_free_block(void *bp)
 {
@@ -175,7 +188,7 @@ static void insert_free_block(void *bp)
 
     int bin = find_bin(size);
 
-    // LIFO 삽입: 작은 bin은 맨 앞에 추가 (first-fit 성능 최적화)
+    // LIFO 삽입: 작은 bin은 맨 앞에 추가 (first-fit에 알맞게)
     PRED(bp) = NULL;
     SUCC(bp) = bins[bin].free_listp;
     if (bins[bin].free_listp != NULL) 
@@ -305,7 +318,7 @@ static void *find_fit(size_t asize)
 {
     void *best = NULL;
 
-    // Large 요청: large list best-fit
+    // Large: large list, best-fit
     if (asize > BIN_MAX_SIZE) 
     {
         void *bp = large_listp;
@@ -327,7 +340,7 @@ static void *find_fit(size_t asize)
         }
     }
 
-    // Small requests: first-fit from bin
+    // Small: bin, first-fit 
     int bin_start = find_bin(asize);
     for (int i = bin_start; i < BIN_COUNT; i++) 
     {
@@ -343,7 +356,7 @@ static void *find_fit(size_t asize)
         }
     }
 
-    // fallback: large list 한번 더
+    // 마지막 보험 large list, first-fit
     void *bp = large_listp;
     while (bp) 
     {
@@ -357,6 +370,7 @@ static void *find_fit(size_t asize)
 
     return NULL;
 }
+
 static void place(void *bp, size_t asize)
 {
     size_t totalsize = GET_SIZE(HDRP(bp)); // 현재 가용 블록의 전체 크기
